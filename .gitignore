@@ -10,3 +10,5 @@ logs/
 .cache_traders.json
 dist/
 build/
+# 含敏感密钥，仅供本地填写参考，切勿上传
+GITHUB_SECRETS.md
