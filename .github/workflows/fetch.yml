@@ -1,0 +1,53 @@
+name: Binance Trader Watch
+
+# 每 15 分钟抓取一次熬鹰资本的最新交易，有新记录才推送微信。
+# 云端全新环境，靠仓库里的 cloud_state.json 跨运行去重。
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # UTC 时间，每 15 分钟
+  workflow_dispatch:           # 允许在 Actions 页面手动触发
+
+# 需要写权限，才能把更新后的 cloud_state.json 提交回仓库
+permissions:
+  contents: write
+
+# 避免同一时刻多个运行并发（防止状态文件冲突）
+concurrency:
+  group: trader-fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Fetch latest trades and notify
+        env:
+          TW_KOPYON_API_KEY: ${{ secrets.TW_KOPYON_API_KEY }}
+          TW_TRADER_IDS: ${{ secrets.TW_TRADER_IDS }}
+          TW_NOTIFY_CHANNEL: ${{ secrets.TW_NOTIFY_CHANNEL }}
+          TW_PUSHPLUS_TOKEN: ${{ secrets.TW_PUSHPLUS_TOKEN }}
+          TW_NOTIFY_ONLY_NEW: 'true'
+        run: python -m trader_watcher.cli cloud-fetch
+
+      - name: Commit state file if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- cloud_state.json; then
+            git add cloud_state.json
+            git commit -m "chore: update cloud fetch state [skip ci]"
+            git push
+          fi
