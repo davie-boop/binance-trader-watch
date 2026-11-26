@@ -60,6 +60,48 @@ class CloudState:
             )
 
 
+def merge_state_files(local_path: str, remote_path: str, output_path: str) -> int:
+    """合并两份去重状态文件，返回合并后的 uid 数量。
+
+    GitHub Actions 多个 run 可能基于同一旧 commit 各自更新状态文件。提交前
+    把「本轮结果」与「远程最新版本」合并：seen 取并集（远程在前、本轮新增在后），
+    initialized 取或，updated_at 取较新的一个，seen 仍受 MAX_SEEN 限制。
+
+    Args:
+        local_path: 本轮运行写出的状态文件。
+        remote_path: 远程分支上最新的状态文件（可不存在）。
+        output_path: 合并结果写入路径。
+
+    Returns:
+        合并后的 uid 条数。
+    """
+
+    def _read(path: str) -> dict[str, Any]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    local = _read(local_path)
+    remote = _read(remote_path)
+    combined = list(remote.get("seen") or []) + list(local.get("seen") or [])
+    seen = list(dict.fromkeys(combined))[-MAX_SEEN:]
+    merged = {
+        "seen": seen,
+        "initialized": bool(remote.get("initialized") or local.get("initialized")),
+        "updated_at": max(
+            str(remote.get("updated_at") or ""),
+            str(local.get("updated_at") or ""),
+        ),
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    return len(seen)
+
+
 def _order_uid(order: OrderRecord) -> str:
     """订单去重键，加前缀避免与平仓 uid 冲突。"""
     return f"order:{order.uid}"

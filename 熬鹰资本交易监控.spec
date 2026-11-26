@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['trader_watcher', 'trader_watcher.config', 'trader_watcher.live', 'trader_watcher.models', 'trader_watcher.notifier', 'trader_watcher.storage', 'trader_watcher.sources', 'trader_watcher.sources.kopyon', 'aiosqlite']
+hiddenimports = ['trader_watcher', 'trader_watcher.config', 'trader_watcher.live', 'trader_watcher.models', 'trader_watcher.notifier', 'trader_watcher.storage', 'trader_watcher.sources', 'trader_watcher.sources.kopyon', 'aiosqlite', 'cron_dispatch', 'httpx']
 tmp_ret = collect_all('aiosqlite')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

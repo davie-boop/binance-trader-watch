@@ -10,7 +10,8 @@ import asyncio
 import json
 import os
 import sys
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ def app_dir() -> Path:
 
 BASE = app_dir()
 os.chdir(BASE)
+sys.path.insert(0, str(BASE))
 sys.path.insert(0, str(BASE / "src"))
 
 
@@ -49,6 +51,7 @@ def load_env() -> Path | None:
 
 ENV_PATH = load_env()
 
+from cron_dispatch import dispatch_workflow, load_env_file
 from trader_watcher.config import Settings, SourceConfig
 from trader_watcher.live import fetch_latest
 from trader_watcher.models import to_local
@@ -57,10 +60,51 @@ from trader_watcher.sources.kopyon import KopyonSource, TraderInfo
 from trader_watcher.storage import PositionStore
 
 Emit = Any  # JS 端的回调对象
+CRON_ENV_FILE = BASE / ".cron.env"
+SCHEDULE_CONFIG_FILE = BASE / "schedule_config.json"
+DEFAULT_SCHEDULE_MINUTES = 15
+MIN_SCHEDULE_MINUTES = 5
+MAX_SCHEDULE_MINUTES = 1440
+
+
+def load_schedule_interval() -> int:
+    """读取上次保存的定时间隔；缺省或非法值时回落到 15 分钟。"""
+    try:
+        data = json.loads(SCHEDULE_CONFIG_FILE.read_text(encoding="utf-8"))
+        value = int(data.get("interval_min", DEFAULT_SCHEDULE_MINUTES))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return DEFAULT_SCHEDULE_MINUTES
+    if MIN_SCHEDULE_MINUTES <= value <= MAX_SCHEDULE_MINUTES:
+        return value
+    return DEFAULT_SCHEDULE_MINUTES
+
+
+def save_schedule_interval(minutes: int) -> None:
+    """把定时间隔保存到程序目录，下次启动自动恢复。"""
+    try:
+        SCHEDULE_CONFIG_FILE.write_text(
+            json.dumps({"interval_min": minutes}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # 只读目录时不影响本次运行
 
 
 def _now() -> str:
     return to_local(datetime.now(UTC)).strftime("%H:%M:%S")
+
+
+def _local_now() -> datetime:
+    """返回带 UTC+8 时区的当前时间，供定时器倒计时使用。"""
+    return to_local(datetime.now(UTC))
+
+
+def _github_token() -> str | None:
+    """优先读环境变量，其次读 exe 同目录 .cron.env。"""
+    token = os.getenv("TW_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if token and token.strip():
+        return token.strip()
+    return load_env_file(CRON_ENV_FILE).get("TW_GITHUB_TOKEN") or None
 
 
 # ---- 交易员列表（独立于 .env，支持别名与当前选中项）----
@@ -316,6 +360,13 @@ class Api:
         # 用双下划线前缀，避免 pywebview 把 window 对象暴露给 JS（会导致递归序列化报错）
         self.__window: Any = None
         self.busy = False
+        # 本地定时任务：窗口开着时按间隔触发云端 Actions
+        self._schedule_lock = threading.Lock()
+        self._schedule_stop = threading.Event()
+        self._schedule_running = False
+        self._schedule_interval_min = load_schedule_interval()
+        self._schedule_next_at: datetime | None = None
+        self._schedule_last = ""
 
     def bind_window(self, window: Any) -> None:
         """绑定 WebView 窗口对象（不暴露给 JS）。"""
@@ -343,8 +394,6 @@ class Api:
                 if self.__window is not None:
                     self.__window.evaluate_js("window.setBusy(false)")
 
-        import threading
-
         threading.Thread(target=worker, daemon=True).start()
         return "started"
 
@@ -359,6 +408,105 @@ class Api:
     def history(self, tid: str, label: str) -> str:
         self._emit(f"\n[{_now()}] 读取 {label} 历史记录…")
         return self._run(lambda emit: _task_history(emit, tid, label, 10))
+
+    # ---- 本地定时任务（JS 调用）----
+
+    def _schedule_loop(self, token: str, interval_min: int) -> None:
+        """后台线程：先立即触发一次，之后每隔 interval_min 分钟触发一次。"""
+        while not self._schedule_stop.is_set():
+            ok, message = dispatch_workflow(token)
+            self._emit(f"[{_now()}] [本地定时] {message}")
+            with self._schedule_lock:
+                self._schedule_last = message
+                self._schedule_next_at = _local_now() + timedelta(minutes=interval_min)
+
+            # 401/403/404/422 属于配置错误，继续重试没有意义，自动停止
+            if not ok and any(code in message for code in ("401", "403", "404", "422")):
+                self._emit(f"[{_now()}] [本地定时] 配置类错误，自动停止。请检查 token 与仓库配置。")
+                break
+            if self._schedule_stop.wait(interval_min * 60):
+                break
+
+        with self._schedule_lock:
+            self._schedule_running = False
+            self._schedule_next_at = None
+        self._emit(f"[{_now()}] [本地定时] 已停止。")
+
+    def start_schedule(self, interval_min: int) -> str:
+        """启动本地定时器；token 从环境变量或 exe 同目录 .cron.env 读取。"""
+        try:
+            interval = int(interval_min)
+        except (TypeError, ValueError):
+            return "错误：间隔必须是数字"
+        if interval < MIN_SCHEDULE_MINUTES or interval > MAX_SCHEDULE_MINUTES:
+            return (
+                f"错误：间隔需在 {MIN_SCHEDULE_MINUTES}-{MAX_SCHEDULE_MINUTES} 分钟之间，"
+                f"建议 {DEFAULT_SCHEDULE_MINUTES} 分钟（与云端一致）"
+            )
+
+        token = _github_token()
+        if not token:
+            return "错误：未找到 GitHub token，请把 TW_GITHUB_TOKEN 写入程序目录 .cron.env"
+
+        save_schedule_interval(interval)
+        with self._schedule_lock:
+            if self._schedule_running:
+                return "定时任务已在运行"
+            self._schedule_stop.clear()
+            self._schedule_running = True
+            self._schedule_interval_min = interval
+            self._schedule_next_at = _local_now()
+            self._schedule_last = "启动中…"
+
+        threading.Thread(
+            target=self._schedule_loop, args=(token, interval), daemon=True
+        ).start()
+        return f"已启动：每 {interval} 分钟触发一次云端抓取，立即执行第一次。"
+
+    def stop_schedule(self) -> str:
+        """停止本地定时器。"""
+        with self._schedule_lock:
+            if not self._schedule_running:
+                return "定时任务未运行"
+            self._schedule_stop.set()
+        return "正在停止定时任务…"
+
+    def schedule_status(self) -> dict[str, Any]:
+        """返回定时器状态，供界面每秒刷新倒计时。"""
+        token_ready = bool(_github_token())
+        with self._schedule_lock:
+            running = self._schedule_running
+            interval = self._schedule_interval_min
+            next_at = self._schedule_next_at
+            last = self._schedule_last
+        remain = (
+            max(0, int((next_at - _local_now()).total_seconds()))
+            if next_at is not None
+            else 0
+        )
+        return {
+            "running": running,
+            "token_ready": token_ready,
+            "interval": interval,
+            "next": next_at.strftime("%H:%M:%S") if next_at else "",
+            "remain": remain,
+            "last": last,
+        }
+
+    def trigger_once(self) -> str:
+        """不启动定时器，只立即触发一次云端抓取。"""
+        token = _github_token()
+        if not token:
+            return "错误：未找到 GitHub token，请把 TW_GITHUB_TOKEN 写入程序目录 .cron.env"
+
+        def worker() -> None:
+            _, message = dispatch_workflow(token)
+            self._emit(f"[{_now()}] [立即触发] {message}")
+            with self._schedule_lock:
+                self._schedule_last = message
+
+        threading.Thread(target=worker, daemon=True).start()
+        return "已提交立即触发请求，结果会显示在下方。"
 
     # ---- 交易员搜索（JS 调用）----
 
@@ -582,6 +730,13 @@ HTML = r"""<!DOCTYPE html>
                       border-radius: 5px; font-size: 13px; font-family: inherit; }
   .search-bar select { padding: 6px; border: 1px solid #cbd5e0; border-radius: 5px; font-size: 12px; }
   #searchResults { margin-top: 10px; max-height: 260px; overflow: auto; }
+  #schedulePanel { background: #fff; border: 1px solid #cbd5e0; border-radius: 8px;
+                   padding: 14px; margin-bottom: 14px; }
+  #schedulePanel h2 { margin: 0 0 10px; font-size: 14px; color: #1e3a5f; }
+  .schedule-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .schedule-bar input { width: 90px; padding: 7px 9px; border: 1px solid #cbd5e0;
+                        border-radius: 5px; font-size: 13px; font-family: inherit; }
+  #scheduleStatus { font-size: 12px; color: #1e3a5f; font-weight: 600; }
   .result-row { display: flex; gap: 10px; align-items: center; padding: 6px 8px;
                 border-bottom: 1px solid #eef2f5; font-size: 12px; }
   .result-row .rname { flex: 1; font-weight: 600; }
@@ -634,6 +789,21 @@ HTML = r"""<!DOCTYPE html>
       <button onclick="addTrader()">添加</button>
     </div>
   </section>
+  <section id="schedulePanel">
+    <h2>本地定时任务（触发云端 GitHub Actions）</h2>
+    <div class="schedule-bar">
+      <label>间隔（分钟）</label>
+      <input id="scheduleInterval" type="number" min="5" max="1440" value="15">
+      <button id="btnScheduleStart" onclick="startSchedule()">启动定时</button>
+      <button id="btnScheduleStop" class="secondary" onclick="stopSchedule()" disabled>停止</button>
+      <button id="btnScheduleOnce" onclick="triggerOnce()">立即触发一次</button>
+      <span id="scheduleStatus">状态读取中…</span>
+    </div>
+    <div class="setup-note" style="margin-top:8px">
+      默认 15 分钟（与云端一致，最小 5 分钟），设置会记住。token 从本程序目录的 .cron.env 读取；启动后立刻触发一次，之后按间隔重复。窗口关闭即停止，不会写入系统任务计划。
+      请勿同时开多个窗口或同时启用 cron-job.org，避免重复触发。
+    </div>
+  </section>
   <section id="setupPanel" style="display:none">
     <h2>配置（只需填一次，保存在本程序目录）</h2>
     <div class="grid">
@@ -684,7 +854,7 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div id="status">就绪</div>
   <div id="out"></div>
-  <div class="hint">订单时间按“最后成交时间”显示（与币安页面一致），限价单若与下单时间不同会额外标注“下单时间”；平仓按平仓时间排序。云端 GitHub Actions 负责每 15 分钟自动抓取，此窗口用于本地手动补抓和临时查看。</div>
+  <div class="hint">订单时间按“最后成交时间”显示（与币安页面一致），限价单若与下单时间不同会额外标注“下单时间”；平仓按平仓时间排序。可用上方“本地定时任务”在本窗口开着时按间隔触发云端抓取；关闭窗口即停止，关机后仍依赖云端或 cron-job.org。</div>
 </main>
 <script>
   const out = document.getElementById('out');
@@ -837,6 +1007,48 @@ HTML = r"""<!DOCTYPE html>
     await window.pywebview.api.history(t.id, t.label);
   }
 
+  // ---- 本地定时任务 ----
+  function formatRemain(sec) {
+    sec = Math.max(0, parseInt(sec || 0, 10));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return m > 0 ? m + '分' + s + '秒' : s + '秒';
+  }
+  async function refreshScheduleStatus() {
+    try {
+      const s = await window.pywebview.api.schedule_status();
+      const el = document.getElementById('scheduleStatus');
+      if (!s.token_ready) {
+        el.textContent = '未启动 · 缺少 .cron.env 中的 token';
+      } else if (s.running) {
+        el.textContent = '运行中 · 间隔 ' + s.interval + ' 分钟 · 下次 ' +
+                         s.next + '（' + formatRemain(s.remain) + '）';
+      } else {
+        el.textContent = '未启动' + (s.last ? ' · 上次：' + s.last : '');
+      }
+      document.getElementById('btnScheduleStart').disabled = s.running || !s.token_ready;
+      document.getElementById('btnScheduleStop').disabled = !s.running;
+      document.getElementById('btnScheduleOnce').disabled = !s.token_ready;
+    } catch (e) { /* pywebview 尚未就绪时忽略 */ }
+  }
+  async function startSchedule() {
+    const n = parseInt(document.getElementById('scheduleInterval').value, 10);
+    const r = await window.pywebview.api.start_schedule(n);
+    appendLine('[' + new Date().toLocaleTimeString('zh-CN') + '] ' + r);
+    await refreshScheduleStatus();
+  }
+  async function stopSchedule() {
+    const r = await window.pywebview.api.stop_schedule();
+    appendLine('[' + new Date().toLocaleTimeString('zh-CN') + '] ' + r);
+    await refreshScheduleStatus();
+  }
+  async function triggerOnce() {
+    const r = await window.pywebview.api.trigger_once();
+    appendLine('[' + new Date().toLocaleTimeString('zh-CN') + '] ' + r);
+    await refreshScheduleStatus();
+  }
+  setInterval(refreshScheduleStatus, 1000);
+
   function toggleTokens() {
     const ch = document.getElementById('cfgChannel').value;
     document.getElementById('rowPushplus').style.display = ch === 'pushplus' ? '' : 'none';
@@ -882,6 +1094,11 @@ HTML = r"""<!DOCTYPE html>
   }
   window.addEventListener('pywebviewready', async function() {
     await loadTraders();
+    try {
+      const saved = await window.pywebview.api.schedule_status();
+      document.getElementById('scheduleInterval').value = saved.interval;
+    } catch (e) { /* 保留 HTML 默认值 */ }
+    await refreshScheduleStatus();
     appendLine('欢迎使用交易记录监控。');
     try {
       const need = await window.pywebview.api.needs_setup();

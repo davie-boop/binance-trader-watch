@@ -43,12 +43,33 @@ jobs:
           TW_NOTIFY_ONLY_NEW: 'true'
         run: python -m trader_watcher.cli cloud-fetch
 
+      # 多个 run（GitHub schedule + 本地定时器 + cron-job.org）可能基于同一个旧
+      # commit 更新状态文件。这里每轮先同步远程最新版本、合并 seen 并集，再提交；
+      # push 被拒时重新拉取并重试，避免 non-fast-forward 导致整个 run 变红。
       - name: Commit state file if changed
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- cloud_state.json; then
+          cp cloud_state.json /tmp/local_state.json
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin main
+            git reset --hard --quiet FETCH_HEAD
+            git show FETCH_HEAD:cloud_state.json > /tmp/remote_state.json 2>/dev/null \
+              || echo '{"seen":[],"initialized":false,"updated_at":""}' > /tmp/remote_state.json
+            python -m trader_watcher.cli state-merge \
+              /tmp/local_state.json /tmp/remote_state.json cloud_state.json
+            if git diff --quiet -- cloud_state.json; then
+              echo "state already up to date (attempt $attempt)"
+              exit 0
+            fi
             git add cloud_state.json
-            git commit -m "chore: update cloud fetch state [skip ci]"
-            git push
-          fi
+            git commit --quiet -m "chore: update cloud fetch state [skip ci]"
+            if git push origin HEAD:main; then
+              echo "state pushed (attempt $attempt)"
+              exit 0
+            fi
+            echo "push rejected, retrying (attempt $attempt)..."
+            sleep $((attempt * 2))
+          done
+          echo "::warning::cloud_state.json push failed after retries; next run will merge again"

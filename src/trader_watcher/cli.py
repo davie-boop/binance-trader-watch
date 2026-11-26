@@ -293,6 +293,19 @@ def cloud_fetch(
     asyncio.run(run())
 
 
+@app.command("state-merge")
+def state_merge(
+    local: str = typer.Argument(..., help="本轮生成的 cloud_state.json"),
+    remote: str = typer.Argument(..., help="远程分支上最新的 cloud_state.json"),
+    output: str = typer.Argument(..., help="合并结果写入路径"),
+) -> None:
+    """合并两份去重状态文件（seen 取并集），供 GitHub Actions 提交前调用。"""
+    from .cloud import merge_state_files
+
+    count = merge_state_files(local, remote, output)
+    typer.echo(f"状态合并完成：{count} 条 uid -> {output}")
+
+
 @app.command("test-notify")
 def test_notify() -> None:
     """发送一条测试消息，验证微信通知渠道是否配置正确。"""

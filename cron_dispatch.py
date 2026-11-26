@@ -91,6 +91,43 @@ def now_beijing() -> str:
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S %z")
 
 
+def dispatch_workflow(
+    token: str,
+    *,
+    repo: str = DEFAULT_REPO,
+    workflow: str = DEFAULT_WORKFLOW,
+    ref: str = DEFAULT_REF,
+    timeout: float = 20.0,
+) -> tuple[bool, str]:
+    """执行一次 workflow_dispatch 请求，供 CLI 与 GUI 定时器共用。
+
+    Returns:
+        (是否成功, 中文结果消息)。网络异常或 HTTP 非 204 均视为失败。
+    """
+    url, headers, payload = build_request(repo, workflow, ref)
+    headers["Authorization"] = f"Bearer {token}"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        return False, f"网络请求失败：{exc}"
+
+    if response.status_code == 204:
+        return True, "触发成功：GitHub Actions 已收到抓取请求。"
+
+    detail = response.text.strip()
+    message = f"GitHub API 返回 HTTP {response.status_code}"
+    if detail:
+        message += f"：{detail[:300]}"
+    if response.status_code in (401, 403):
+        message += "（token 无效、过期或权限不足）"
+    elif response.status_code == 404:
+        message += "（仓库或 workflow 名错误，或 token 无权访问）"
+    elif response.status_code == 422:
+        message += "（workflow_dispatch 未启用或 ref 分支不存在）"
+    return False, message
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="触发 binance-trader-watch 的 GitHub Actions 抓取任务")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="GitHub 仓库，形如 owner/repo")
@@ -122,27 +159,17 @@ def main(argv: list[str] | None = None) -> int:
         print("错误：未找到 GitHub token。请设置 TW_GITHUB_TOKEN 或写入 .cron.env。", file=sys.stderr)
         return 2
 
-    try:
-        with httpx.Client(timeout=args.timeout) as client:
-            response = client.post(url, headers=headers, json=payload)
-    except httpx.HTTPError as exc:
-        print(f"错误：网络请求失败：{exc}", file=sys.stderr)
-        return 3
-
-    if response.status_code == 204:
-        print(f"[{now_beijing()}] 触发成功：GitHub Actions 已收到抓取请求。")
+    ok, message = dispatch_workflow(
+        token,
+        repo=args.repo,
+        workflow=args.workflow,
+        ref=args.ref,
+        timeout=args.timeout,
+    )
+    if ok:
+        print(f"[{now_beijing()}] {message}")
         return 0
-
-    print(f"错误：GitHub API 返回 HTTP {response.status_code}", file=sys.stderr)
-    detail = response.text.strip()
-    if detail:
-        print(detail[:1000], file=sys.stderr)
-    if response.status_code in (401, 403):
-        print("请确认 token 有效，并授予该仓库 Actions: write 权限。", file=sys.stderr)
-    elif response.status_code == 404:
-        print("请确认仓库名、workflow 文件名正确，且 token 能访问该仓库。", file=sys.stderr)
-    elif response.status_code == 422:
-        print("请确认 fetch.yml 已启用 workflow_dispatch，且 --ref 分支存在。", file=sys.stderr)
+    print(f"错误：{message}", file=sys.stderr)
     return 1
 
 

@@ -2,6 +2,10 @@
 
 GitHub 自带的 `schedule` 目前没有按点触发，但 `workflow_dispatch` 手动触发是正常的。因此用外部 cron 服务每 15 分钟调用一次 GitHub API，效果等同于手动点「Run workflow」，电脑关机也能运行。
 
+> 新版 exe 已内置「本地定时任务」：窗口开着时按间隔调用同一个 `workflow_dispatch` 接口，适合先在本地跑通链路；窗口关闭即停止。默认间隔已固定为 **15 分钟**（最小 5 分钟，设置会记住）。详见 `EXE使用说明.md` 第三节。
+
+> **避免重复触发**：GitHub 自带 schedule、exe 本地定时器、cron-job.org 三者同时开会重复调用云端，请只保留一个触发源（或让间隔错开）。云端 `fetch.yml` 已加「状态文件合并 + push 重试」，即便偶发并发也不会再因 `cloud_state.json` 提交冲突导致运行变红。
+
 ## 1. 创建 GitHub Fine-grained PAT
 
 逐项点击清单见 `PAT申请步骤.md`；下面是配置项精简版。
@@ -20,6 +24,8 @@ GitHub 自带的 `schedule` 目前没有按点触发，但 `workflow_dispatch` �
 > 传统 PAT（classic）也可以，但只需勾选 `repo`（或 public_repo）即可，权限比细粒度 token 更大，优先用上面的细粒度 PAT。
 
 ## 2. cron-job.org 任务配置
+
+逐项点击清单见 `cron-job.org建任务步骤.md`；下面是字段速查表。
 
 打开 https://cron-job.org/ ，注册/登录后 **Create cronjob**：
 
