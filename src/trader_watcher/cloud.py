@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from .config import Settings, SourceConfig
-from .live import format_closed, format_order
+from .live import collect_recent_closed, collect_recent_orders, format_closed, format_order
 from .models import ClosedPosition, OrderRecord, to_local
 from .notifier import build_message, build_notifier
 from .sources.kopyon import KopyonSource
@@ -91,11 +92,10 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
 
     try:
         for tid in settings.trader_id_list:
-            order_page = await source.fetch_orders(tid)
-            closed_page = await source.fetch_closed_positions(tid)
-
-            orders = sorted(order_page.items, key=lambda o: o.created_at, reverse=True)[:20]
-            closed = sorted(closed_page.items, key=lambda c: c.closed_at, reverse=True)[:20]
+            orders, closed = await asyncio.gather(
+                collect_recent_orders(source, tid, 20),
+                collect_recent_closed(source, tid, 20),
+            )
             uids = [_order_uid(o) for o in orders] + [_closed_uid(c) for c in closed]
             seen = set(state.seen)
 

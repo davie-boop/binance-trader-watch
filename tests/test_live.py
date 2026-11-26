@@ -50,11 +50,25 @@ class FakeSource:
     def __init__(self, orders: list[OrderRecord]) -> None:
         self.orders = orders
 
-    async def fetch_orders(self, trader_id: str, *, cursor: str | None = None) -> HistoryPage:
+    async def fetch_orders(
+        self,
+        trader_id: str,
+        *,
+        cursor: str | None = None,
+        rows: int = 20,
+        start_time: int | None = None,
+    ) -> HistoryPage:
         """按最新在前返回假订单（与真实接口一致）。"""
         return HistoryPage(items=list(reversed(self.orders)), total=len(self.orders), next_cursor=None)
 
-    async def fetch_closed_positions(self, trader_id: str, *, cursor: str | None = None) -> HistoryPage:
+    async def fetch_closed_positions(
+        self,
+        trader_id: str,
+        *,
+        cursor: str | None = None,
+        rows: int = 20,
+        sort_by: str = "closed",
+    ) -> HistoryPage:
         """返回空平仓页。"""
         return HistoryPage(items=[], total=0, next_cursor=None)
 
@@ -75,4 +89,49 @@ async def test_fetch_latest_limits_and_incremental(tmp_path: Path) -> None:
     assert len(all2) == 5
     assert len(new2) == 0
 
+    await store.close()
+
+
+def test_format_order_uses_fill_time_and_keeps_placed_time() -> None:
+    """限价单隔天成交时，显示成交时间并标注下单时间。"""
+    order = OrderRecord.from_api(
+        {
+            "symbol": "SOXLUSDT",
+            "side": "BUY",
+            "price": 25,
+            "quantity": 101.41,
+            "createdAt": 1795531937590,  # 北京 11-24 22:52:17
+            "updatedAt": 1795625037394,  # 北京 11-26 00:43:57
+            "orderType": "LIMIT",
+        }
+    )
+    line = format_order(order)
+    assert line.startswith("11-26 00:43:57")
+    assert "(下单 11-24 22:52:17)" in line
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_sorts_by_fill_time(tmp_path: Path) -> None:
+    """取最新记录按最后成交时间排序，而不是按下单时间。"""
+    early_filled = OrderRecord.from_api(
+        {
+            "symbol": "EARLYUSDT", "side": "BUY", "price": 1, "quantity": 1,
+            "createdAt": 1700000000000, "updatedAt": 1700100000000,
+            "orderType": "LIMIT",
+        }
+    )
+    late_placed = OrderRecord.from_api(
+        {
+            "symbol": "LATEUSDT", "side": "BUY", "price": 1, "quantity": 1,
+            "createdAt": 1700200000000, "updatedAt": 1700050000000,
+            "orderType": "LIMIT",
+        }
+    )
+    store = PositionStore(tmp_path / "fill.db")
+    await store.open()
+    all_lines, _, _, _ = await fetch_latest(
+        FakeSource([early_filled, late_placed]), store, "t2", 2, kind="orders"
+    )
+    assert "EARLYUSDT" in all_lines[0]
+    assert "LATEUSDT" in all_lines[1]
     await store.close()

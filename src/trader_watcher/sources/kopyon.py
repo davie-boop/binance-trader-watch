@@ -19,6 +19,17 @@ from .base import SourceError
 
 
 @dataclass(slots=True)
+class TraderInfo:
+    """交易员榜单条目（用于按名称搜索）。"""
+
+    trader_id: str
+    name: str
+    roi: float = 0.0
+    copiers: int = 0
+    aum: float = 0.0
+
+
+@dataclass(slots=True)
 class HistoryPage:
     """一页历史记录及其游标。"""
 
@@ -137,14 +148,16 @@ class KopyonSource:
         trader_id: str,
         *,
         cursor: str | None = None,
-        page_size: int = 20,
+        rows: int = 20,
+        start_time: int | None = None,
     ) -> HistoryPage[OrderRecord]:
         """拉取订单/成交记录（单页）。
 
         Args:
             trader_id: 跟单 portfolio id。
             cursor: 分页游标，首次传 None。
-            page_size: 每页条数。
+            rows: 每页条数，接口上限 20。
+            start_time: 只返回最后成交时间不早于该毫秒时间戳的订单。
 
         Returns:
             含订单列表、总数和下一页游标的结果。
@@ -152,9 +165,11 @@ class KopyonSource:
         Raises:
             SourceError: 请求失败或响应格式异常。
         """
-        params: dict[str, Any] = {"traderId": trader_id}
+        params: dict[str, Any] = {"traderId": trader_id, "rows": min(max(rows, 1), 20)}
         if cursor:
             params["cursor"] = cursor
+        if start_time is not None:
+            params["startTime"] = int(start_time)
         payload = await self._get_json("/orderHistory", params)
         data = payload.get("data") or {}
         try:
@@ -173,14 +188,16 @@ class KopyonSource:
         trader_id: str,
         *,
         cursor: str | None = None,
-        page_size: int = 20,
+        rows: int = 20,
+        sort_by: str = "closed",
     ) -> HistoryPage[ClosedPosition]:
         """拉取已平仓的完整持仓回合（单页）。
 
         Args:
             trader_id: 跟单 portfolio id。
             cursor: 分页游标，首次传 None。
-            page_size: 每页条数。
+            rows: 每页条数，接口上限 20。
+            sort_by: opened 按开仓时间倒序，closed 按平仓时间倒序。
 
         Returns:
             含平仓列表、总数和下一页游标的结果。
@@ -188,7 +205,11 @@ class KopyonSource:
         Raises:
             SourceError: 请求失败或响应格式异常。
         """
-        params: dict[str, Any] = {"traderId": trader_id}
+        params: dict[str, Any] = {
+            "traderId": trader_id,
+            "rows": min(max(rows, 1), 20),
+            "sortBy": sort_by,
+        }
         if cursor:
             params["cursor"] = cursor
         payload = await self._get_json("/positionHistory", params)
@@ -203,6 +224,95 @@ class KopyonSource:
             total=int(data.get("total", 0)),
             next_cursor=data.get("nextCursor") or None,
         )
+
+    async def fetch_traders(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        period: str = "30D",
+        sort_by: str = "roi",
+    ) -> HistoryPage[TraderInfo]:
+        """拉取交易员排行榜的一页（接口不支持按名称搜索，只能分页拉取）。
+
+        Args:
+            page: 页码，从 1 开始。
+            page_size: 每页条数（接口固定 20）。
+            period: 统计周期，如 30D。
+            sort_by: 排序字段，如 roi / pnl / copiers。
+
+        Returns:
+            含交易员列表和是否还有下一页的结果。
+        """
+        params: dict[str, Any] = {
+            "period": period,
+            "sortBy": sort_by,
+            "order": "DESC",
+            "page": page,
+        }
+        payload = await self._get_json("/traders", params)
+        data = payload.get("data") or {}
+        items: list[TraderInfo] = []
+        for raw in data.get("traders") or []:
+            items.append(
+                TraderInfo(
+                    trader_id=str(raw.get("traderId") or ""),
+                    name=str(raw.get("name") or ""),
+                    roi=float(raw.get("roi") or 0),
+                    copiers=int(raw.get("copiers") or 0),
+                    aum=float(raw.get("aum") or 0),
+                )
+            )
+        return HistoryPage(
+            items=items,
+            total=int(data.get("total", 0)),
+            next_cursor=str(page + 1) if data.get("hasMore") else None,
+        )
+
+    async def search_traders_by_name(
+        self,
+        name: str,
+        *,
+        page: int = 1,
+        rows: int = 20,
+    ) -> HistoryPage[TraderInfo]:
+        """按名称搜索交易员（数据源提供的服务端搜索接口）。
+
+        Args:
+            name: 名称关键字。
+            page: 页码，从 1 开始。
+            rows: 每页条数，接口上限 20。
+
+        Returns:
+            含交易员列表和是否还有下一页的结果。
+        """
+        payload = await self._get_json(
+            "/traderSearch",
+            {"name": name, "page": page, "rows": min(max(rows, 1), 20)},
+        )
+        data = payload.get("data") or {}
+        items = [
+            TraderInfo(
+                trader_id=str(raw.get("traderId") or ""),
+                name=str(raw.get("name") or ""),
+                roi=float(raw.get("roi") or 0),
+                copiers=int(raw.get("copiers") or 0),
+                aum=float(raw.get("aum") or 0),
+            )
+            for raw in data.get("traders") or []
+        ]
+        return HistoryPage(
+            items=items,
+            total=int(data.get("total", 0)),
+            next_cursor=str(page + 1) if data.get("hasMore") else None,
+        )
+
+    async def check_trader(self, trader_id: str) -> bool:
+        """按 ID 验证交易员是否有效（组合仍活跃且有订单历史）。"""
+        params = {"traderId": trader_id, "rows": 1}
+        payload = await self._get_json("/orderHistory", params)
+        data = payload.get("data") or {}
+        return int(data.get("total", 0)) > 0 or bool(data.get("orders"))
 
     async def aclose(self) -> None:
         """关闭 HTTP 连接池。"""

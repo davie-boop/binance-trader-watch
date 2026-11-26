@@ -3,26 +3,35 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import time
 
 from .models import ClosedPosition, OrderRecord, to_local
 from .sources.kopyon import KopyonSource
 from .storage import PositionStore
 
+# 限价单可能挂单几天后才成交，按更新时间取最近订单时向前看一周
+ORDER_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
+
 
 def format_order(order: OrderRecord) -> str:
     """把订单格式化为单行摘要。
+
+    时间显示的是最后成交/变更时间（币安页面看到的成交时间），
+    若与下单时间不一致则额外括号标注下单时间，避免误以为数据是旧的。
 
     Args:
         order: 订单记录。
 
     Returns:
-        形如 ``"10:23:01 BUY  BTCUSDT  price=50000 qty=0.5"`` 的字符串。
+        形如 ``"00:43:57 BUY  SOXLUSDT  price=25 qty=101.41 (下单 11-24 22:52:17)"`` 的字符串。
     """
-    ts = to_local(order.created_at).strftime("%m-%d %H:%M:%S")
+    ts = to_local(order.updated_at).strftime("%m-%d %H:%M:%S")
+    placed = ""
+    if order.created_at != order.updated_at:
+        placed = f" (下单 {to_local(order.created_at):%m-%d %H:%M:%S})"
     return (
         f"{ts}  {order.side.value:<4} {order.symbol:<14} "
-        f"price={order.price:g} qty={order.quantity:g} type={order.order_type}"
+        f"price={order.price:g} qty={order.quantity:g} type={order.order_type}{placed}"
     )
 
 
@@ -44,6 +53,48 @@ def format_closed(position: ClosedPosition) -> str:
     )
 
 
+async def collect_recent_orders(
+    source: KopyonSource,
+    trader_id: str,
+    limit: int = 20,
+) -> list[OrderRecord]:
+    """按最后成交时间返回最近的订单。
+
+    数据源默认按“下单时间”倒序返回第一页，但限价单可能挂单几天后才成交。
+    因此额外拉一次最近一周有成交的订单，合并去重后按 ``updated_at`` 倒序，
+    才能与币安页面看到的“最新成交”一致。
+
+    Args:
+        source: 数据源。
+        trader_id: 交易员 id。
+        limit: 最多返回多少条。
+
+    Returns:
+        按最后成交时间倒序排列的订单列表。
+    """
+    now_ms = int(time.time() * 1000)
+    placed, recently_filled = await asyncio.gather(
+        source.fetch_orders(trader_id),
+        source.fetch_orders(trader_id, start_time=now_ms - ORDER_LOOKBACK_MS),
+    )
+    merged = {o.uid: o for o in [*placed.items, *recently_filled.items]}
+    return sorted(
+        merged.values(),
+        key=lambda o: (o.updated_at, o.created_at),
+        reverse=True,
+    )[:limit]
+
+
+async def collect_recent_closed(
+    source: KopyonSource,
+    trader_id: str,
+    limit: int = 20,
+) -> list[ClosedPosition]:
+    """按平仓时间返回最近的持仓回合（显式要求服务端按 closed 排序）。"""
+    page = await source.fetch_closed_positions(trader_id, sort_by="closed")
+    return sorted(page.items, key=lambda c: c.closed_at, reverse=True)[:limit]
+
+
 async def fetch_latest(
     source: KopyonSource,
     store: PositionStore,
@@ -53,7 +104,7 @@ async def fetch_latest(
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """拉取并落库最新记录，同时返回全部最新行与其中新增的行。
 
-    接口每页固定 20 条且按时间倒序，取第一页前 ``limit`` 条即可。
+    订单按最后成交时间取最新 N 条，平仓按平仓时间取最新 N 条。
     ``save_*`` 用唯一键去重；这里在写入前先查已有 uid 做差集，
     保证新增行只包含真正的新记录。
 
@@ -72,21 +123,16 @@ async def fetch_latest(
     """
     orders: list[OrderRecord] = []
     closed: list[ClosedPosition] = []
-    def newest_first(items: list[Any], key: str) -> list[Any]:
-        """按时间戳字段倒序排列，确保取到的是真正最新的 N 条。"""
-        return sorted(items, key=lambda x: getattr(x, key), reverse=True)
 
     if kind == "all":
-        order_page, closed_page = await asyncio.gather(
-            source.fetch_orders(trader_id),
-            source.fetch_closed_positions(trader_id),
+        orders, closed = await asyncio.gather(
+            collect_recent_orders(source, trader_id, limit),
+            collect_recent_closed(source, trader_id, limit),
         )
-        orders = newest_first(order_page.items, "created_at")[:limit]
-        closed = newest_first(closed_page.items, "closed_at")[:limit]
     elif kind == "orders":
-        orders = newest_first((await source.fetch_orders(trader_id)).items, "created_at")[:limit]
+        orders = await collect_recent_orders(source, trader_id, limit)
     elif kind == "positions":
-        closed = newest_first((await source.fetch_closed_positions(trader_id)).items, "closed_at")[:limit]
+        closed = await collect_recent_closed(source, trader_id, limit)
 
     all_orders = [format_order(o) for o in orders]
     all_closed = [format_closed(c) for c in closed]

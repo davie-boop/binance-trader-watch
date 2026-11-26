@@ -33,6 +33,7 @@ def build_message(
     trader_id: str,
     order_lines: list[str],
     closed_lines: list[str],
+    trader_name: str | None = None,
 ) -> NotifyMessage:
     """把已格式化（北京时间）的记录行包装成微信推送消息。
 
@@ -40,13 +41,15 @@ def build_message(
         trader_id: 交易员 portfolio id。
         order_lines: 订单文本行，来自 live.format_order。
         closed_lines: 平仓文本行，来自 live.format_closed。
+        trader_name: 交易员别名，缺省时显示"熬鹰资本"。
 
     Returns:
         标题与 Markdown 正文。
     """
+    name = trader_name or "熬鹰资本"
     now = to_local(datetime.now(UTC)).strftime("%m-%d %H:%M")
-    title = f"熬鹰资本 {now} 最新交易"
-    lines = [f"### 熬鹰资本（{trader_id}）", f"抓取时间：{now}", ""]
+    title = f"{name} {now} 最新交易"
+    lines = [f"### {name}（{trader_id}）", f"抓取时间：{now}", ""]
 
     if order_lines:
         lines.append(f"**最新 {len(order_lines)} 笔订单**")

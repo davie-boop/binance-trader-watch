@@ -39,10 +39,24 @@ def fake_source(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, config: object) -> None:
             pass
 
-        async def fetch_orders(self, trader_id: str) -> FakePage:
+        async def fetch_orders(
+            self,
+            trader_id: str,
+            *,
+            cursor: str | None = None,
+            rows: int = 20,
+            start_time: int | None = None,
+        ) -> FakePage:
             return FakePage(list(self.orders))
 
-        async def fetch_closed_positions(self, trader_id: str) -> FakePage:
+        async def fetch_closed_positions(
+            self,
+            trader_id: str,
+            *,
+            cursor: str | None = None,
+            rows: int = 20,
+            sort_by: str = "closed",
+        ) -> FakePage:
             return FakePage([])
 
         async def aclose(self) -> None:
