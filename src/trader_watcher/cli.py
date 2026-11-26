@@ -285,7 +285,9 @@ def cloud_fetch(
 
         summary = await run_cloud_fetch(settings, state_file)
         typer.echo(
-            f"云端抓取完成：初始化={summary['initialized']} "
+            f"云端抓取完成：交易员={summary['traders']} "
+            f"新增交易员={summary['new_traders']} "
+            f"初始化={summary['initialized']} "
             f"新订单={summary['new_orders']} 新平仓={summary['new_closed']} "
             f"推送={summary['push']}"
         )

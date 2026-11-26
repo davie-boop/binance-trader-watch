@@ -199,7 +199,10 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
                 )
                 summary["push"] = await notifier.send(msg)
     finally:
-        state.initialized_traders = list(initialized_ids)
+        # 按配置顺序保存，避免 set 迭代顺序导致状态文件不稳定
+        state.initialized_traders = [
+            tid for tid in settings.trader_id_list if tid in initialized_ids
+        ]
         state.save(state_path)
         if notifier is not None:
             await notifier.aclose()
