@@ -6,7 +6,16 @@ name: Binance Trader Watch
 on:
   schedule:
     - cron: '1,16,31,46 * * * *'   # UTC 时间，每 15 分钟（避开整点）
-  workflow_dispatch:           # 允许在 Actions 页面手动触发
+  workflow_dispatch:           # 允许手动触发，也可由本地 exe / 外部 cron 带交易员列表调用
+    inputs:
+      trader_ids:
+        description: '逗号分隔的交易员 ID；留空则使用仓库 Secret TW_TRADER_IDS'
+        required: false
+        type: string
+      trader_labels:
+        description: '交易员别名映射 JSON；留空则推送标题显示 ID'
+        required: false
+        type: string
 
 # 需要写权限，才能把更新后的 cloud_state.json 提交回仓库
 permissions:
@@ -37,7 +46,8 @@ jobs:
       - name: Fetch latest trades and notify
         env:
           TW_KOPYON_API_KEY: ${{ secrets.TW_KOPYON_API_KEY }}
-          TW_TRADER_IDS: ${{ secrets.TW_TRADER_IDS }}
+          TW_TRADER_IDS: ${{ inputs.trader_ids || secrets.TW_TRADER_IDS }}
+          TW_TRADER_LABELS: ${{ inputs.trader_labels || '' }}
           TW_NOTIFY_CHANNEL: ${{ secrets.TW_NOTIFY_CHANNEL }}
           TW_PUSHPLUS_TOKEN: ${{ secrets.TW_PUSHPLUS_TOKEN }}
           TW_NOTIFY_ONLY_NEW: 'true'

@@ -52,6 +52,12 @@ GitHub 自带的 `schedule` 目前没有按点触发，但 `workflow_dispatch` �
 {"ref":"main"}
 ```
 
+要一次抓取多个交易员，可在 Body 里加 `inputs`（不传则用仓库 Secret `TW_TRADER_IDS`）：
+
+```json
+{"ref":"main","inputs":{"trader_ids":"5075281354358777856,5261429206216458753","trader_labels":"{\"5075281354358777856\":\"熬鹰资本\",\"5261429206216458753\":\"爽翻翻\"}"}}
+```
+
 保存后，先点任务列表里的 **Run now** 测试一次：
 
 - GitHub Actions 页面应出现一条事件为 `workflow_dispatch` 的新运行；

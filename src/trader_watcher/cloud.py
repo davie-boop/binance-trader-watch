@@ -31,6 +31,8 @@ class CloudState:
 
     seen: list[str] = field(default_factory=list)
     initialized: bool = False
+    # 按交易员记录是否已首次初始化：新加入的交易员首次只记录历史，不推送
+    initialized_traders: list[str] = field(default_factory=list)
     updated_at: str = ""
 
     @classmethod
@@ -44,6 +46,7 @@ class CloudState:
         return cls(
             seen=list(data.get("seen") or []),
             initialized=bool(data.get("initialized", False)),
+            initialized_traders=list(data.get("initialized_traders") or []),
             updated_at=str(data.get("updated_at", "")),
         )
 
@@ -53,7 +56,12 @@ class CloudState:
         self.updated_at = to_local(datetime.now(UTC)).isoformat()
         with open(path, "w", encoding="utf-8") as f:
             json.dump(
-                {"seen": self.seen, "initialized": self.initialized, "updated_at": self.updated_at},
+                {
+                    "seen": self.seen,
+                    "initialized": self.initialized,
+                    "initialized_traders": list(dict.fromkeys(self.initialized_traders)),
+                    "updated_at": self.updated_at,
+                },
                 f,
                 ensure_ascii=False,
                 indent=2,
@@ -88,9 +96,16 @@ def merge_state_files(local_path: str, remote_path: str, output_path: str) -> in
     remote = _read(remote_path)
     combined = list(remote.get("seen") or []) + list(local.get("seen") or [])
     seen = list(dict.fromkeys(combined))[-MAX_SEEN:]
+    initialized_traders = list(
+        dict.fromkeys(
+            list(remote.get("initialized_traders") or [])
+            + list(local.get("initialized_traders") or [])
+        )
+    )
     merged = {
         "seen": seen,
         "initialized": bool(remote.get("initialized") or local.get("initialized")),
+        "initialized_traders": initialized_traders,
         "updated_at": max(
             str(remote.get("updated_at") or ""),
             str(local.get("updated_at") or ""),
@@ -126,11 +141,20 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
         SourceError: 数据源请求失败。
     """
     state = CloudState.load(state_path)
+    initialized_ids = set(state.initialized_traders)
+    labels = settings.trader_label_map
     source = KopyonSource(
         SourceConfig(api_key=settings.kopyon_api_key, base_url=settings.kopyon_base_url)
     )
     notifier = build_notifier(settings)
-    summary: dict[str, Any] = {"initialized": state.initialized, "new_orders": 0, "new_closed": 0, "push": "disabled"}
+    summary: dict[str, Any] = {
+        "initialized": state.initialized,
+        "new_orders": 0,
+        "new_closed": 0,
+        "push": "disabled",
+        "traders": len(settings.trader_id_list),
+        "new_traders": 0,
+    }
 
     try:
         for tid in settings.trader_id_list:
@@ -141,14 +165,15 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
             uids = [_order_uid(o) for o in orders] + [_closed_uid(c) for c in closed]
             seen = set(state.seen)
 
-            if not state.initialized:
-                # 首次运行：只把当前记录标记为已见，不推送历史
+            if tid not in initialized_ids:
+                # 新加入的交易员：首次只记录历史，避免刚添加就推送几十条旧记录
+                initialized_ids.add(tid)
                 state.initialized = True
+                summary["new_traders"] += 1
                 for uid in uids:
                     if uid not in seen:
                         state.seen.append(uid)
                         seen.add(uid)
-                summary["initialized"] = False
                 continue
 
             new_orders = [o for o in orders if _order_uid(o) not in seen]
@@ -170,9 +195,11 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
                     tid,
                     [format_order(o) for o in new_orders],
                     [format_closed(c) for c in new_closed],
+                    labels.get(tid, tid),
                 )
                 summary["push"] = await notifier.send(msg)
     finally:
+        state.initialized_traders = list(initialized_ids)
         state.save(state_path)
         if notifier is not None:
             await notifier.aclose()

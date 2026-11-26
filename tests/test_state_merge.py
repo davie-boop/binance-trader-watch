@@ -18,8 +18,10 @@ def test_merge_union_dedup_and_metadata(tmp_path: Path) -> None:
     remote = tmp_path / "remote.json"
     local = tmp_path / "local.json"
     output = tmp_path / "out.json"
-    _write(remote, {"seen": ["a", "b"], "initialized": True, "updated_at": "2026-11-26T10:00:00+08:00"})
-    _write(local, {"seen": ["b", "c"], "initialized": True, "updated_at": "2026-11-26T10:15:00+08:00"})
+    _write(remote, {"seen": ["a", "b"], "initialized": True,
+                    "initialized_traders": ["t1"], "updated_at": "2026-11-26T10:00:00+08:00"})
+    _write(local, {"seen": ["b", "c"], "initialized": True,
+                   "initialized_traders": ["t2"], "updated_at": "2026-11-26T10:15:00+08:00"})
 
     count = merge_state_files(str(local), str(remote), str(output))
     data = json.loads(output.read_text(encoding="utf-8"))
@@ -27,6 +29,7 @@ def test_merge_union_dedup_and_metadata(tmp_path: Path) -> None:
     assert count == 3
     assert data["seen"] == ["a", "b", "c"]
     assert data["initialized"] is True
+    assert data["initialized_traders"] == ["t1", "t2"]
     assert data["updated_at"] == "2026-11-26T10:15:00+08:00"
     assert output.read_text(encoding="utf-8").endswith("\n")
 

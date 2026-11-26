@@ -67,23 +67,30 @@ MIN_SCHEDULE_MINUTES = 5
 MAX_SCHEDULE_MINUTES = 1440
 
 
-def load_schedule_interval() -> int:
-    """读取上次保存的定时间隔；缺省或非法值时回落到 15 分钟。"""
+VALID_SCHEDULE_SCOPES = ("all", "current")
+
+
+def load_schedule_config() -> tuple[int, str]:
+    """读取定时间隔与抓取范围；缺省或非法时回落到 15 分钟 / 全部。"""
     try:
         data = json.loads(SCHEDULE_CONFIG_FILE.read_text(encoding="utf-8"))
-        value = int(data.get("interval_min", DEFAULT_SCHEDULE_MINUTES))
+        minutes = int(data.get("interval_min", DEFAULT_SCHEDULE_MINUTES))
+        scope = str(data.get("scope", "all"))
     except (OSError, ValueError, TypeError, AttributeError):
-        return DEFAULT_SCHEDULE_MINUTES
-    if MIN_SCHEDULE_MINUTES <= value <= MAX_SCHEDULE_MINUTES:
-        return value
-    return DEFAULT_SCHEDULE_MINUTES
+        return DEFAULT_SCHEDULE_MINUTES, "all"
+    if not (MIN_SCHEDULE_MINUTES <= minutes <= MAX_SCHEDULE_MINUTES):
+        minutes = DEFAULT_SCHEDULE_MINUTES
+    if scope not in VALID_SCHEDULE_SCOPES:
+        scope = "all"
+    return minutes, scope
 
 
-def save_schedule_interval(minutes: int) -> None:
-    """把定时间隔保存到程序目录，下次启动自动恢复。"""
+def save_schedule_config(minutes: int, scope: str) -> None:
+    """把定时间隔与抓取范围保存到程序目录，下次启动自动恢复。"""
     try:
         SCHEDULE_CONFIG_FILE.write_text(
-            json.dumps({"interval_min": minutes}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps({"interval_min": minutes, "scope": scope}, ensure_ascii=False, indent=2)
+            + "\n",
             encoding="utf-8",
         )
     except OSError:
@@ -145,6 +152,27 @@ def save_traders(data: dict[str, Any]) -> None:
     TRADERS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def _scheduled_traders(scope: str) -> list[dict[str, Any]]:
+    """按定时范围返回要抓取的交易员条目（每次触发时重新读取，新增的也能生效）。"""
+    data = load_traders()
+    traders = [t for t in (data.get("traders") or []) if t.get("id")]
+    if scope == "current":
+        current = data.get("current")
+        traders = [t for t in traders if t["id"] == current]
+    return traders
+
+
+def _schedule_inputs(scope: str) -> dict[str, str]:
+    """构造 workflow_dispatch 输入：交易员 ID 列表与别名映射。"""
+    traders = _scheduled_traders(scope)
+    ids = list(dict.fromkeys(t["id"] for t in traders))
+    labels = {t["id"]: t.get("name") or t["id"] for t in traders}
+    return {
+        "trader_ids": ",".join(ids),
+        "trader_labels": json.dumps(labels, ensure_ascii=False),
+    }
 
 
 # ---- 交易员搜索缓存（榜单接口不支持服务端搜索，本地缓存后过滤）----
@@ -364,7 +392,7 @@ class Api:
         self._schedule_lock = threading.Lock()
         self._schedule_stop = threading.Event()
         self._schedule_running = False
-        self._schedule_interval_min = load_schedule_interval()
+        self._schedule_interval_min, self._schedule_scope = load_schedule_config()
         self._schedule_next_at: datetime | None = None
         self._schedule_last = ""
 
@@ -411,11 +439,13 @@ class Api:
 
     # ---- 本地定时任务（JS 调用）----
 
-    def _schedule_loop(self, token: str, interval_min: int) -> None:
+    def _schedule_loop(self, token: str, interval_min: int, scope: str) -> None:
         """后台线程：先立即触发一次，之后每隔 interval_min 分钟触发一次。"""
         while not self._schedule_stop.is_set():
-            ok, message = dispatch_workflow(token)
-            self._emit(f"[{_now()}] [本地定时] {message}")
+            inputs = _schedule_inputs(scope)
+            ok, message = dispatch_workflow(token, inputs=inputs)
+            count = len([part for part in inputs["trader_ids"].split(",") if part])
+            self._emit(f"[{_now()}] [本地定时] {message}（{count} 位交易员）")
             with self._schedule_lock:
                 self._schedule_last = message
                 self._schedule_next_at = _local_now() + timedelta(minutes=interval_min)
@@ -432,8 +462,8 @@ class Api:
             self._schedule_next_at = None
         self._emit(f"[{_now()}] [本地定时] 已停止。")
 
-    def start_schedule(self, interval_min: int) -> str:
-        """启动本地定时器；token 从环境变量或 exe 同目录 .cron.env 读取。"""
+    def start_schedule(self, interval_min: int, scope: str = "all") -> str:
+        """启动本地定时器；scope 决定抓取全部已添加还是仅当前选中的交易员。"""
         try:
             interval = int(interval_min)
         except (TypeError, ValueError):
@@ -443,25 +473,34 @@ class Api:
                 f"错误：间隔需在 {MIN_SCHEDULE_MINUTES}-{MAX_SCHEDULE_MINUTES} 分钟之间，"
                 f"建议 {DEFAULT_SCHEDULE_MINUTES} 分钟（与云端一致）"
             )
+        if scope not in VALID_SCHEDULE_SCOPES:
+            scope = "all"
 
         token = _github_token()
         if not token:
             return "错误：未找到 GitHub token，请把 TW_GITHUB_TOKEN 写入程序目录 .cron.env"
 
-        save_schedule_interval(interval)
+        inputs = _schedule_inputs(scope)
+        count = len([part for part in inputs["trader_ids"].split(",") if part])
+        if not count:
+            return "错误：没有可抓取的交易员，请先在「管理交易员」里添加。"
+
+        save_schedule_config(interval, scope)
         with self._schedule_lock:
             if self._schedule_running:
                 return "定时任务已在运行"
             self._schedule_stop.clear()
             self._schedule_running = True
             self._schedule_interval_min = interval
+            self._schedule_scope = scope
             self._schedule_next_at = _local_now()
             self._schedule_last = "启动中…"
 
         threading.Thread(
-            target=self._schedule_loop, args=(token, interval), daemon=True
+            target=self._schedule_loop, args=(token, interval, scope), daemon=True
         ).start()
-        return f"已启动：每 {interval} 分钟触发一次云端抓取，立即执行第一次。"
+        label = "当前选中" if scope == "current" else "全部已添加"
+        return f"已启动：每 {interval} 分钟抓取{label}的 {count} 位交易员，立即执行第一次。"
 
     def stop_schedule(self) -> str:
         """停止本地定时器。"""
@@ -477,6 +516,7 @@ class Api:
         with self._schedule_lock:
             running = self._schedule_running
             interval = self._schedule_interval_min
+            scope = self._schedule_scope
             next_at = self._schedule_next_at
             last = self._schedule_last
         remain = (
@@ -488,25 +528,35 @@ class Api:
             "running": running,
             "token_ready": token_ready,
             "interval": interval,
+            "scope": scope,
             "next": next_at.strftime("%H:%M:%S") if next_at else "",
             "remain": remain,
             "last": last,
         }
 
-    def trigger_once(self) -> str:
+    def trigger_once(self, scope: str = "all") -> str:
         """不启动定时器，只立即触发一次云端抓取。"""
         token = _github_token()
         if not token:
             return "错误：未找到 GitHub token，请把 TW_GITHUB_TOKEN 写入程序目录 .cron.env"
+        if scope not in VALID_SCHEDULE_SCOPES:
+            scope = "all"
+        inputs = _schedule_inputs(scope)
+        count = len([part for part in inputs["trader_ids"].split(",") if part])
+        if not count:
+            return "错误：没有可抓取的交易员，请先在「管理交易员」里添加。"
+
+        save_schedule_config(self._schedule_interval_min, scope)
 
         def worker() -> None:
-            _, message = dispatch_workflow(token)
-            self._emit(f"[{_now()}] [立即触发] {message}")
+            _, message = dispatch_workflow(token, inputs=inputs)
+            self._emit(f"[{_now()}] [立即触发] {message}（{count} 位交易员）")
             with self._schedule_lock:
                 self._schedule_last = message
+                self._schedule_scope = scope
 
         threading.Thread(target=worker, daemon=True).start()
-        return "已提交立即触发请求，结果会显示在下方。"
+        return f"已提交立即触发请求（{count} 位交易员），结果会显示在下方。"
 
     # ---- 交易员搜索（JS 调用）----
 
@@ -734,8 +784,9 @@ HTML = r"""<!DOCTYPE html>
                    padding: 14px; margin-bottom: 14px; }
   #schedulePanel h2 { margin: 0 0 10px; font-size: 14px; color: #1e3a5f; }
   .schedule-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .schedule-bar input { width: 90px; padding: 7px 9px; border: 1px solid #cbd5e0;
-                        border-radius: 5px; font-size: 13px; font-family: inherit; }
+  .schedule-bar input, .schedule-bar select { width: 100px; padding: 7px 9px;
+                        border: 1px solid #cbd5e0; border-radius: 5px;
+                        font-size: 13px; font-family: inherit; }
   #scheduleStatus { font-size: 12px; color: #1e3a5f; font-weight: 600; }
   .result-row { display: flex; gap: 10px; align-items: center; padding: 6px 8px;
                 border-bottom: 1px solid #eef2f5; font-size: 12px; }
@@ -794,13 +845,18 @@ HTML = r"""<!DOCTYPE html>
     <div class="schedule-bar">
       <label>间隔（分钟）</label>
       <input id="scheduleInterval" type="number" min="5" max="1440" value="15">
+      <label>抓取范围</label>
+      <select id="scheduleScope">
+        <option value="all">全部已添加</option>
+        <option value="current">仅当前选中</option>
+      </select>
       <button id="btnScheduleStart" onclick="startSchedule()">启动定时</button>
       <button id="btnScheduleStop" class="secondary" onclick="stopSchedule()" disabled>停止</button>
       <button id="btnScheduleOnce" onclick="triggerOnce()">立即触发一次</button>
       <span id="scheduleStatus">状态读取中…</span>
     </div>
     <div class="setup-note" style="margin-top:8px">
-      默认 15 分钟（与云端一致，最小 5 分钟），设置会记住。token 从本程序目录的 .cron.env 读取；启动后立刻触发一次，之后按间隔重复。窗口关闭即停止，不会写入系统任务计划。
+      默认 15 分钟（与云端一致，最小 5 分钟），设置会记住。「抓取范围」可选全部已添加或仅当前选中；到点时会把你添加的交易员列表一次性传给云端抓取，新加入的交易员首次只记录历史、不推旧消息。token 从本程序目录的 .cron.env 读取；启动后立刻触发一次，之后按间隔重复。窗口关闭即停止，不会写入系统任务计划。
       请勿同时开多个窗口或同时启用 cron-job.org，避免重复触发。
     </div>
   </section>
@@ -1021,8 +1077,9 @@ HTML = r"""<!DOCTYPE html>
       if (!s.token_ready) {
         el.textContent = '未启动 · 缺少 .cron.env 中的 token';
       } else if (s.running) {
-        el.textContent = '运行中 · 间隔 ' + s.interval + ' 分钟 · 下次 ' +
-                         s.next + '（' + formatRemain(s.remain) + '）';
+        el.textContent = '运行中 · 间隔 ' + s.interval + ' 分钟 · ' +
+                         (s.scope === 'current' ? '仅当前选中' : '全部已添加') +
+                         ' · 下次 ' + s.next + '（' + formatRemain(s.remain) + '）';
       } else {
         el.textContent = '未启动' + (s.last ? ' · 上次：' + s.last : '');
       }
@@ -1033,7 +1090,8 @@ HTML = r"""<!DOCTYPE html>
   }
   async function startSchedule() {
     const n = parseInt(document.getElementById('scheduleInterval').value, 10);
-    const r = await window.pywebview.api.start_schedule(n);
+    const scope = document.getElementById('scheduleScope').value;
+    const r = await window.pywebview.api.start_schedule(n, scope);
     appendLine('[' + new Date().toLocaleTimeString('zh-CN') + '] ' + r);
     await refreshScheduleStatus();
   }
@@ -1043,7 +1101,8 @@ HTML = r"""<!DOCTYPE html>
     await refreshScheduleStatus();
   }
   async function triggerOnce() {
-    const r = await window.pywebview.api.trigger_once();
+    const scope = document.getElementById('scheduleScope').value;
+    const r = await window.pywebview.api.trigger_once(scope);
     appendLine('[' + new Date().toLocaleTimeString('zh-CN') + '] ' + r);
     await refreshScheduleStatus();
   }
@@ -1097,6 +1156,7 @@ HTML = r"""<!DOCTYPE html>
     try {
       const saved = await window.pywebview.api.schedule_status();
       document.getElementById('scheduleInterval').value = saved.interval;
+      document.getElementById('scheduleScope').value = saved.scope || 'all';
     } catch (e) { /* 保留 HTML 默认值 */ }
     await refreshScheduleStatus();
     appendLine('欢迎使用交易记录监控。');

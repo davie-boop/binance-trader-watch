@@ -105,3 +105,90 @@ async def test_cloud_fetch_initialize_then_only_new(
     )
     third = await run_cloud_fetch(settings, state_path)
     assert third["new_orders"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_traders_initialize_silently_then_push_with_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新交易员首次只记录不推历史；之后新记录用别名作为推送标题。"""
+    from trader_watcher import cloud
+    from trader_watcher.notifier import NotifyMessage
+
+    def make_order(symbol: str) -> OrderRecord:
+        return OrderRecord.from_api(
+            {
+                "symbol": symbol,
+                "side": "BUY",
+                "price": 1.0,
+                "quantity": 1.0,
+                "createdAt": 1795650989796,
+                "updatedAt": 1795650989796,
+                "orderType": "MARKET",
+            }
+        )
+
+    class FakePage:
+        def __init__(self, items: list[OrderRecord]) -> None:
+            self.items = items
+
+    class FakeSource:
+        orders: ClassVar[dict[str, list[OrderRecord]]] = {
+            "t1": [make_order("T1USDT")],
+            "t2": [make_order("T2USDT")],
+        }
+
+        def __init__(self, config: object) -> None:
+            pass
+
+        async def fetch_orders(
+            self,
+            trader_id: str,
+            *,
+            cursor: str | None = None,
+            rows: int = 20,
+            start_time: int | None = None,
+        ) -> FakePage:
+            return FakePage(list(self.orders.get(trader_id) or []))
+
+        async def fetch_closed_positions(
+            self, trader_id: str, *, cursor: str | None = None, rows: int = 20, sort_by: str = "closed"
+        ) -> FakePage:
+            return FakePage([])
+
+        async def aclose(self) -> None:
+            pass
+
+    sent: list[NotifyMessage] = []
+
+    class FakeNotifier:
+        async def send(self, message: NotifyMessage) -> str:
+            sent.append(message)
+            return "ok"
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(cloud, "KopyonSource", FakeSource)
+    monkeypatch.setattr(cloud, "build_notifier", lambda settings: FakeNotifier())
+
+    state_path = str(tmp_path / "state.json")
+    settings = Settings(
+        trader_ids="t1,t2",
+        notify_channel="pushplus",
+        trader_labels='{"t1":"交易员一","t2":"交易员二"}',
+    )
+
+    first = await run_cloud_fetch(settings, state_path)
+    assert first["traders"] == 2
+    assert first["new_traders"] == 2
+    assert not sent  # 首次静默，不推历史
+    state = cloud.CloudState.load(state_path)
+    assert state.initialized_traders == ["t1", "t2"]
+    assert len(state.seen) == 2
+
+    FakeSource.orders["t2"].insert(0, make_order("NEW2USDT"))
+    second = await run_cloud_fetch(settings, state_path)
+    assert second["new_orders"] == 1
+    assert len(sent) == 1
+    assert sent[0].title.startswith("交易员二")

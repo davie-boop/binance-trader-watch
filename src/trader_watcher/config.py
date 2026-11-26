@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,9 @@ class Settings(BaseSettings):
 
     # 用逗号分隔的交易员 portfolio id，例如 "123,456"。
     trader_ids: str = Field(default="", description="逗号分隔的 trader/portfolio id")
+    trader_labels: str = Field(
+        default="", description="交易员别名映射 JSON，如 {\"507...\":\"熬鹰资本\"}"
+    )
     poll_interval: int = Field(default=60, ge=5, description="轮询间隔（秒）")
     db_path: Path = Field(default=Path("data/trader_positions.db"), description="SQLite 数据库路径")
 
@@ -53,6 +57,17 @@ class Settings(BaseSettings):
     def trader_id_list(self) -> list[str]:
         """返回清洗后的交易员 id 列表。"""
         return [part.strip() for part in self.trader_ids.split(",") if part.strip()]
+
+    @property
+    def trader_label_map(self) -> dict[str, str]:
+        """返回交易员 id -> 别名映射；JSON 非法时返回空字典。"""
+        try:
+            data = json.loads(self.trader_labels)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(key): str(value) for key, value in data.items()}
 
 
 @dataclass(frozen=True, slots=True)

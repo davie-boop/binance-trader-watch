@@ -17,6 +17,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -70,8 +71,13 @@ def mask(token: str | None) -> str:
     return f"{token[:4]}...{token[-4:]}"
 
 
-def build_request(repo: str, workflow: str, ref: str) -> tuple[str, dict[str, str], dict[str, str]]:
-    """构造 GitHub workflow_dispatch 请求。"""
+def build_request(
+    repo: str,
+    workflow: str,
+    ref: str,
+    inputs: dict[str, str] | None = None,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """构造 GitHub workflow_dispatch 请求；inputs 会作为 workflow 输入传入。"""
     url = (
         "https://api.github.com/repos/"
         f"{quote(repo, safe='/')}/actions/workflows/"
@@ -82,7 +88,10 @@ def build_request(repo: str, workflow: str, ref: str) -> tuple[str, dict[str, st
         "X-GitHub-Api-Version": API_VERSION,
         "User-Agent": "binance-trader-watch-cron/1.0",
     }
-    payload = {"ref": ref}
+    payload: dict[str, Any] = {"ref": ref}
+    clean_inputs = {key: value for key, value in (inputs or {}).items() if value}
+    if clean_inputs:
+        payload["inputs"] = clean_inputs
     return url, headers, payload
 
 
@@ -97,14 +106,23 @@ def dispatch_workflow(
     repo: str = DEFAULT_REPO,
     workflow: str = DEFAULT_WORKFLOW,
     ref: str = DEFAULT_REF,
+    inputs: dict[str, str] | None = None,
     timeout: float = 20.0,
 ) -> tuple[bool, str]:
     """执行一次 workflow_dispatch 请求，供 CLI 与 GUI 定时器共用。
 
+    Args:
+        token: GitHub PAT。
+        repo: owner/repo。
+        workflow: workflow 文件名。
+        ref: 分支或标签。
+        inputs: 传给 workflow_dispatch 的输入（如 trader_ids / trader_labels）。
+        timeout: 请求超时秒数。
+
     Returns:
         (是否成功, 中文结果消息)。网络异常或 HTTP 非 204 均视为失败。
     """
-    url, headers, payload = build_request(repo, workflow, ref)
+    url, headers, payload = build_request(repo, workflow, ref, inputs)
     headers["Authorization"] = f"Bearer {token}"
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -134,12 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 文件名，默认 fetch.yml")
     parser.add_argument("--ref", default=DEFAULT_REF, help="分支或标签，默认 main")
     parser.add_argument("--env-file", type=Path, default=None, help="额外的 token 文件，默认读取脚本旁 .cron.env")
+    parser.add_argument("--trader-ids", default=None, help="逗号分隔的交易员 ID，传入云端一次性抓取")
+    parser.add_argument("--trader-labels", default=None, help="交易员别名映射 JSON，用于推送标题")
     parser.add_argument("--timeout", type=float, default=20.0, help="请求超时秒数，默认 20")
     parser.add_argument("--dry-run", action="store_true", help="只打印请求内容，不真正触发")
     args = parser.parse_args(argv)
 
+    inputs = {
+        "trader_ids": args.trader_ids or "",
+        "trader_labels": args.trader_labels or "",
+    }
     token = resolve_token(args.env_file)
-    url, headers, payload = build_request(args.repo, args.workflow, args.ref)
+    url, headers, payload = build_request(args.repo, args.workflow, args.ref, inputs)
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
@@ -164,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         repo=args.repo,
         workflow=args.workflow,
         ref=args.ref,
+        inputs=inputs,
         timeout=args.timeout,
     )
     if ok:
