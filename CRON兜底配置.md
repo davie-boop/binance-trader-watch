@@ -4,6 +4,8 @@ GitHub 自带的 `schedule` 目前没有按点触发，但 `workflow_dispatch` �
 
 ## 1. 创建 GitHub Fine-grained PAT
 
+逐项点击清单见 `PAT申请步骤.md`；下面是配置项精简版。
+
 1. 打开：https://github.com/settings/personal-access-tokens
 2. 点击 **Generate new token → Fine-grained token**
 3. Token name：`binance-trader-watch-cron`
