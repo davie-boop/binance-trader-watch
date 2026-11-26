@@ -11,9 +11,11 @@ from trader_watcher.notifier import (
     NotifyMessage,
     PushPlusNotifier,
     ServerChanNotifier,
+    TraderUpdate,
     WeComNotifier,
     build_message,
     build_notifier,
+    build_summary_message,
 )
 
 
@@ -92,3 +94,38 @@ def test_build_message_uses_beijing_time() -> None:
     # 标题形如「熬鹰资本 MM-DD HH:MM 最新交易」，抓取时间是本地北京时间
     assert "最新交易" in msg.title
     assert len(msg.title.split(" ")) == 4
+
+
+def test_summary_message_contains_all_traders() -> None:
+    """汇总消息包含每位交易员的小节、别名与记录行。"""
+    updates = [
+        TraderUpdate(
+            trader_id="111",
+            name="熬鹰资本",
+            order_lines=["11-26 10:00 BUY AAAUSDT price=1 qty=2"],
+            closed_lines=["11-26 11:00 BBBUSDT LONG ROI=+1%"],
+        ),
+        TraderUpdate(
+            trader_id="222",
+            name="爽翻翻",
+            order_lines=["11-26 12:00 SELL CCCUSDT price=3 qty=4"],
+            closed_lines=[],
+        ),
+    ]
+
+    msg = build_summary_message(updates)
+
+    assert msg.title.startswith("交易汇总")
+    assert "交易汇总（2 位交易员）" in msg.content
+    assert "#### 熬鹰资本（111）" in msg.content
+    assert "#### 爽翻翻（222）" in msg.content
+    assert "- 11-26 10:00 BUY AAAUSDT price=1 qty=2" in msg.content
+    assert "- 11-26 11:00 BBBUSDT LONG ROI=+1%" in msg.content
+    assert "- 11-26 12:00 SELL CCCUSDT price=3 qty=4" in msg.content
+
+
+def test_single_trader_message_keeps_alias() -> None:
+    """单交易员仍使用原有消息格式，标题带别名。"""
+    msg = build_message("111", ["11-26 10:00 BUY AAAUSDT"], [], "熬鹰资本")
+    assert msg.title.startswith("熬鹰资本")
+    assert "### 熬鹰资本（111）" in msg.content

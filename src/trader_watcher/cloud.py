@@ -16,7 +16,7 @@ from typing import Any
 from .config import Settings, SourceConfig
 from .live import collect_recent_closed, collect_recent_orders, format_closed, format_order
 from .models import ClosedPosition, OrderRecord, to_local
-from .notifier import build_message, build_notifier
+from .notifier import TraderUpdate, build_notifier, build_summary_message
 from .sources.kopyon import KopyonSource
 
 # 默认状态文件放在项目根，随仓库提交（不在 .gitignore 中）
@@ -155,6 +155,7 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
         "traders": len(settings.trader_id_list),
         "new_traders": 0,
     }
+    collected: list[TraderUpdate] = []
 
     try:
         for tid in settings.trader_id_list:
@@ -190,14 +191,18 @@ async def run_cloud_fetch(settings: Settings, state_path: str = DEFAULT_STATE_PA
                     state.seen.append(uid)
                     seen.add(uid)
 
-            if notifier is not None:
-                msg = build_message(
-                    tid,
-                    [format_order(o) for o in new_orders],
-                    [format_closed(c) for c in new_closed],
-                    labels.get(tid, tid),
+            collected.append(
+                TraderUpdate(
+                    trader_id=tid,
+                    name=labels.get(tid, tid),
+                    order_lines=[format_order(o) for o in new_orders],
+                    closed_lines=[format_closed(c) for c in new_closed],
                 )
-                summary["push"] = await notifier.send(msg)
+            )
+
+        # 所有交易员抓完后只推一条汇总消息，避免多人时连续刷屏
+        if collected and notifier is not None:
+            summary["push"] = await notifier.send(build_summary_message(collected))
     finally:
         # 按配置顺序保存，避免 set 迭代顺序导致状态文件不稳定
         state.initialized_traders = [

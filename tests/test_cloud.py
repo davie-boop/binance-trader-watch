@@ -111,7 +111,7 @@ async def test_cloud_fetch_initialize_then_only_new(
 async def test_multi_traders_initialize_silently_then_push_with_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """新交易员首次只记录不推历史；之后新记录用别名作为推送标题。"""
+    """新交易员首次只记录不推历史；之后新记录合并为一条汇总消息，别名作为小节标题。"""
     from trader_watcher import cloud
     from trader_watcher.notifier import NotifyMessage
 
@@ -187,8 +187,13 @@ async def test_multi_traders_initialize_silently_then_push_with_alias(
     assert state.initialized_traders == ["t1", "t2"]
     assert len(state.seen) == 2
 
+    FakeSource.orders["t1"].insert(0, make_order("NEW1USDT"))
     FakeSource.orders["t2"].insert(0, make_order("NEW2USDT"))
     second = await run_cloud_fetch(settings, state_path)
-    assert second["new_orders"] == 1
-    assert len(sent) == 1
-    assert sent[0].title.startswith("交易员二")
+    assert second["new_orders"] == 2
+    assert len(sent) == 1  # 两位交易员合并为一条汇总消息
+    assert sent[0].title.startswith("交易汇总")
+    assert "#### 交易员一（t1）" in sent[0].content
+    assert "#### 交易员二（t2）" in sent[0].content
+    assert "NEW1USDT" in sent[0].content
+    assert "NEW2USDT" in sent[0].content

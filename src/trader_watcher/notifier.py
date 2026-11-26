@@ -63,6 +63,35 @@ def build_message(
     return NotifyMessage(title=title, content="\n".join(lines).rstrip())
 
 
+@dataclass(slots=True, frozen=True)
+class TraderUpdate:
+    """单个交易员本轮的新记录，用于汇总成一条消息。"""
+
+    trader_id: str
+    name: str
+    order_lines: list[str]
+    closed_lines: list[str]
+
+
+def build_summary_message(updates: list[TraderUpdate]) -> NotifyMessage:
+    """把多位交易员的新记录汇总成一条微信消息，每位一个小节。"""
+    now = to_local(datetime.now(UTC)).strftime("%m-%d %H:%M")
+    title = f"交易汇总 {now} 最新交易"
+    lines = [f"### 交易汇总（{len(updates)} 位交易员）", f"抓取时间：{now}", ""]
+    for update in updates:
+        name = update.name or update.trader_id
+        lines.append(f"#### {name}（{update.trader_id}）")
+        if update.order_lines:
+            lines.append(f"**最新 {len(update.order_lines)} 笔订单**")
+            lines.extend(f"- {line}" for line in update.order_lines)
+            lines.append("")
+        if update.closed_lines:
+            lines.append(f"**最新 {len(update.closed_lines)} 笔平仓**")
+            lines.extend(f"- {line}" for line in update.closed_lines)
+            lines.append("")
+    return NotifyMessage(title=title, content="\n".join(lines).rstrip())
+
+
 class BaseNotifier:
     """通知渠道基类。"""
 
