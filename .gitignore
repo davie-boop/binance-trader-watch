@@ -12,3 +12,9 @@ dist/
 build/
 # 含敏感密钥，仅供本地填写参考，切勿上传
 GITHUB_SECRETS.md
+# 运行时数据（交易员列表/搜索缓存）与本地构建产物，不进源码仓库
+traders.json
+traders_cache.json
+*.exe
+*.zip
+分发包/
