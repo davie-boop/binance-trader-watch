@@ -1,0 +1,66 @@
+================================================================
+cron-job.org 最终配置（可直接使用）
+================================================================
+
+用途：每 15 分钟触发云端 GitHub Actions，一次性抓取你已添加的
+      全部 5 位交易员，并汇总成一条微信消息推送。
+      这是唯一不依赖 GitHub 自带 schedule、也不依赖本地电脑开机的方案。
+
+【注册 / 登录】
+https://cron-job.org/  ->  右上角 Sign up / Sign in
+
+【第一步：新建任务】
+点 Create cronjob，按下面填：
+
+  Title:            binance-trader-watch
+  URL:              https://api.github.com/repos/davie-boop/binance-trader-watch/actions/workflows/fetch.yml/dispatches
+  Method:           POST
+  Schedule:         Every 15 minutes
+  Timezone:         Asia/Shanghai（或 UTC，均可）
+
+【第二步：Headers（4 条，逐条添加）】
+  Accept            application/vnd.github+json
+  X-GitHub-Api-Version  2022-11-28
+  Content-Type      application/json
+  Authorization     Bearer <从这里复制你的PAT: 项目目录 .cron.env 里 TW_GITHUB_TOKEN= 后面的值>
+
+  注意：Bearer 后面有一个英文空格；token 前后不要加引号；
+        .cron.env 是本地隐藏文件，不要上传到 GitHub。
+
+【第三步：Request body（整段复制，一行，不要换行）】
+
+{"ref":"main","inputs":{"trader_ids":"5075281354358777856,5261429206216458753,5285947977434857729,5305355976370339073,5312928647505109504","trader_labels":"{\"5075281354358777856\":\"熬鹰资本\",\"5261429206216458753\":\"爽翻翻\",\"5285947977434857729\":\"金木爱交易A\",\"5305355976370339073\":\"金木爱交易B\",\"5312928647505109504\":\"金木爱交易C\"}"}}
+
+  说明：trader_ids 是 5 位交易员 ID，trader_labels 是它们的别名映射。
+        为避免推送里三个「金木爱交易」无法区分，这里临时命名为 A/B/C；
+        如果你想用别的名字，改上面对应位置的文字即可。
+
+【第四步：保存并测试】
+1. 点 Create / Save 保存任务。
+2. 在任务列表点 Run now / Execute now 手动执行一次。
+   返回 HTTP 204 即成功（GitHub 这个接口成功时无响应体）。
+3. 打开 Actions 页面确认出现新的 workflow_dispatch 且 success：
+   https://github.com/davie-boop/binance-trader-watch/actions
+4. 等下一个 15 分钟窗口，看任务执行历史是否自动出现 204，
+   Actions 是否自动新增运行 —— 出现即代表接管成功。
+
+【验证是否真的生效】
+  成功标志：微信收到「交易汇总」消息（有新交易时），且 Actions 里
+  每 15 分钟就有一条 workflow_dispatch 运行，日志显示「交易员=5」。
+
+【排错】
+  401 / 403   PAT 无效、过期或权限不足 -> 重新生成 Fine-grained PAT
+              （仅该仓库，Actions: Read and write），更新 Header 后点 Run now。
+  404         仓库名或 workflow 文件名写错 -> 对照上面的 URL 逐字检查。
+  405         Method 不是 POST -> 改成 POST。
+  422         Body 格式错误或 ref 分支不存在 -> 整段复制上面的 Body，确认分支为 main。
+  204 但 Actions 没反应 等 10-30 秒刷新；仍无则用 Get Message 看返回详情。
+
+【重要提醒】
+- 配置好 cron-job.org 之后，把 GitHub 仓库里的自带 schedule 注释掉，
+  避免两个源重复触发（重复不会重复推微信，但会多耗 Actions 分钟数）。
+- 本地 exe 的「本地定时任务」是备用：只在窗口开着且点了「启动定时」时工作，
+  昨晚停摆的直接原因就是它没有启动 + 窗口关闭。
+- PAT 建议 90 天有效期；到期前 7 天重新生成并同时更新这里的 Header
+  和本地 .cron.env。
+================================================================

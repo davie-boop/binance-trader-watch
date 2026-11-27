@@ -1,0 +1,12 @@
+# Cloudflare Worker 配置
+# 文档：https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "binance-trader-watch-cron"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Cron Triggers：UTC 时间每 15 分钟触发一次。
+# 免费版 Worker 包含 Cron Triggers，每天 96 次远低于 10 万次请求额度。
+# UTC 的 */15 对应北京时间 :00/:15/:30/:45，与币安记录时间无关，仅决定触发节奏。
+[triggers]
+crons = ["*/15 * * * *"]
