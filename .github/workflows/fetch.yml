@@ -4,8 +4,8 @@ name: Binance Trader Watch
 # 云端全新环境，靠仓库里的 cloud_state.json 跨运行去重。
 # 分钟取 1/16/31/46 而非整点：GitHub 在整点附近负载高，定时可能被延迟或丢弃。
 on:
-  schedule:
-    - cron: '1,16,31,46 * * * *'   # UTC 时间，每 15 分钟（避开整点）
+#  schedule:
+#    - cron: '1,16,31,46 * * * *'   # UTC 时间，每 15 分钟（避开整点）
   workflow_dispatch:           # 允许手动触发，也可由本地 exe / 外部 cron 带交易员列表调用
     inputs:
       trader_ids:
