@@ -21,3 +21,5 @@ schedule_config.json
 *.exe
 *.zip
 分发包/
+.wrangler/
+cloudflare-worker/.wrangler/
